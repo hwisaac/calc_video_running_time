@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QLabel,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
@@ -25,9 +26,10 @@ class VideoProcessor(QThread):
     video_processed = pyqtSignal(str, float)
     processing_finished = pyqtSignal()
 
-    def __init__(self, video_paths):
+    def __init__(self, video_paths, use_rounding=False):
         super().__init__()
         self.video_paths = video_paths
+        self.use_rounding = use_rounding
 
     def run(self):
         """비디오 처리 실행"""
@@ -37,7 +39,7 @@ class VideoProcessor(QThread):
             self.progress_updated.emit(progress)
 
             # 비디오 길이 계산
-            duration = self.get_video_duration(video_path)
+            duration = self.get_video_duration(video_path, self.use_rounding)
 
             # 파일명만 추출
             file_name = os.path.basename(video_path)
@@ -49,7 +51,7 @@ class VideoProcessor(QThread):
         self.progress_updated.emit(100)
         self.processing_finished.emit()
 
-    def get_video_duration(self, video_path):
+    def get_video_duration(self, video_path, use_rounding=False):
         """비디오 파일의 러닝타임을 분 단위로 반환"""
         try:
             cap = cv2.VideoCapture(video_path)
@@ -63,11 +65,22 @@ class VideoProcessor(QThread):
             # 러닝타임 계산 (초 단위)
             duration_sec = frame_count / fps if fps > 0 else 0
 
-            # 분 단위로 변환
-            duration_min = duration_sec / 60
-
+            
+            total_minutes = int(duration_sec // 60)
+            remaining_seconds = duration_sec % 60
             cap.release()
-            return round(duration_min, 2)  # 소수점 2자리까지 반올림
+            if use_rounding:
+                # 반올림 적용: 29초/30초 기점
+                if remaining_seconds >= 30:
+                    total_minutes += 1
+                return float(total_minutes)
+            else:
+                # 기존 방식: 분 단위로 변환하여 소수점 2자리까지
+                if remaining_seconds > 0:
+                    total_minutes += 1
+                
+                return float(total_minutes)
+                
         except Exception as e:
             print(f"오류 발생: {e}")
             return 0
@@ -101,10 +114,18 @@ class VideoDurationGUI(QMainWindow):
         self.add_button.clicked.connect(self.add_videos)
         button_layout.addWidget(self.add_button)
 
+        self.delete_button = QPushButton('선택 삭제')
+        self.delete_button.clicked.connect(self.delete_selected_rows)
+        button_layout.addWidget(self.delete_button)
+
         # 엑셀 저장 버튼
         self.save_button = QPushButton('xlsx 저장')
         self.save_button.clicked.connect(self.save_to_excel)
         button_layout.addWidget(self.save_button)
+
+        # 반올림 체크박스
+        self.rounding_checkbox = QCheckBox('반올림 적용')
+        button_layout.addWidget(self.rounding_checkbox)
 
         # 테이블 위젯 (동영상 목록과 러닝타임 표시)
         self.table = QTableWidget()
@@ -128,7 +149,21 @@ class VideoDurationGUI(QMainWindow):
         # 메인 위젯 설정
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
+    def delete_selected_rows(self):
+        """선택된 테이블 행 삭제"""
+        selected_rows = set()
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
 
+        if not selected_rows:
+            QMessageBox.information(self, '알림', '삭제할 항목을 선택하세요.')
+            return
+
+        for row in sorted(selected_rows, reverse=True):
+            self.table.removeRow(row)
+            del self.video_data[row]
+
+        self.status_label.setText(f'준비됨 (총 {len(self.video_data)}개 비디오)')
     def add_videos(self):
         """동영상 파일 추가"""
         file_dialog = QFileDialog()
@@ -149,8 +184,9 @@ class VideoDurationGUI(QMainWindow):
             self.add_button.setEnabled(False)
             self.save_button.setEnabled(False)
 
-            # 비디오 처리 스레드 시작
-            self.video_processor = VideoProcessor(file_paths)
+            # 비디오 처리 스레드 시작 (반올림 옵션 전달)
+            use_rounding = self.rounding_checkbox.isChecked()
+            self.video_processor = VideoProcessor(file_paths, use_rounding)
             self.video_processor.progress_updated.connect(self.update_progress)
             self.video_processor.video_processed.connect(self.add_video_to_table)
             self.video_processor.processing_finished.connect(self.processing_finished)
